@@ -47,7 +47,7 @@ jobs:
             chmod +x integration-tests.sh
             ./integration-tests.sh
 
-      - run: yes Y | curl -sSL https://sdk.cloud.google.com | bash
+      - run: curl -sSL https://sdk.cloud.google.com --disable-prompts | bash
       - run: env PATH $PATH:/root/google-cloud-sdk/bin
       - run: gcloud --quiet components update
       - run: gcloud --quiet components update kubectl
