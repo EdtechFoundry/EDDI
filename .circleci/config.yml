@@ -47,10 +47,10 @@ jobs:
             chmod +x integration-tests.sh
             ./integration-tests.sh
 
-      - run: env CLOUDSDK_CORE_DISABLE_PROMPTS=1
-
       - run:
+          name: install google cloud sdk
           command: |
+            env CLOUDSDK_CORE_DISABLE_PROMPTS=1
             curl https://dl.google.com/dl/cloudsdk/channels/rapid/downloads/google-cloud-sdk-$CLOUD_SDK_VERSION-linux-x86_64.tar.gz
             tar -zxvf google-cloud-sdk-$CLOUD_SDK_VERSION-linux-x86_64.tar.gz
             bash ./google-cloud-sdk/install.sh
