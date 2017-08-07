@@ -49,11 +49,13 @@ jobs:
 
       - run: env CLOUDSDK_CORE_DISABLE_PROMPTS=1
 
-      - run: curl https://dl.google.com/dl/cloudsdk/channels/rapid/downloads/google-cloud-sdk-$CLOUD_SDK_VERSION.0.0-linux-x86_64.tar.gz -o google-cloud-sdk-$CLOUD_SDK_VERSION.0.0-linux-x86_64.tar.gz && \
-            tar -zxvf google-cloud-sdk-$CLOUD_SDK_VERSION.0.0-linux-x86_64.tar.gz && \
-            bash ./google-cloud-sdk/install.sh && \
+      - run:
+          command: |
+            curl https://dl.google.com/dl/cloudsdk/channels/rapid/downloads/google-cloud-sdk-$CLOUD_SDK_VERSION.0.0-linux-x86_64.tar.gz -o google-cloud-sdk-$CLOUD_SDK_VERSION.0.0-linux-x86_64.tar.gz
+            tar -zxvf google-cloud-sdk-$CLOUD_SDK_VERSION.0.0-linux-x86_64.tar.gz
+            bash ./google-cloud-sdk/install.sh
             unlink google-cloud-sdk-$CLOUD_SDK_VERSION.0.0-linux-x86_64.tar.gz
-      - run: echo "source /google-cloud-sdk/completion.bash.inc" >> ~/.bashrc && \
+            echo "source /google-cloud-sdk/completion.bash.inc" >> ~/.bashrc
             echo "source /google-cloud-sdk/path.bash.inc" >> ~/.bashrc
 
       - run: env PATH $PATH:/root/google-cloud-sdk/bin
