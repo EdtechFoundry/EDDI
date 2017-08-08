@@ -6,20 +6,9 @@ jobs:
   build:
     docker:
       - image: labsai/ci-build
-        args:
-          CLUSTER_NAME: ${CLUSTER_NAME}
-          GOOGLE_COMPUTE_ZONE: ${CLOUDSDK_COMPUTE_ZONE}
-          PROJECT_NAME: ${PROJECT_NAME}
         environment:
-          ACCT_AUTH: ${ACCT_AUTH}
-          APP_NAME: eddi
-          DOCKER_IMAGE: ${DOCKER_IMAGE}
-          PROJECT_NAME: ${PROJECT_NAME}
-          CLUSTER_NAME: ${CLUSTER_NAME}
-          CLOUDSDK_COMPUTE_ZONE: ${CLOUDSDK_COMPUTE_ZONE}
+          EDDI_ENV: development
           EDDI_JAVA_ENV_MONGODB_HOSTS: mongodb.hosts=eddi-storage-0.eddi-storage
-          #PATH: ${PATH}:/usr/local/gcloud/google-cloud-sdk/bin
-          CLOUD_SDK_VERSION: 165.0.0
     working_directory: ~/eddi
     steps:
       - checkout
@@ -40,50 +29,9 @@ jobs:
           paths:
             - /root/.m2
 
-#      - run:
-#         name: Start container and verify it's working
-#          command: |
-#            set -x
-#            chmod +x integration-tests.sh
-#            ./integration-tests.sh
-
       - run:
-          name: install google cloud sdk
+         name: Start container and verify it's working
           command: |
-            env CLOUDSDK_CORE_DISABLE_PROMPTS=1
-            curl https://dl.google.com/dl/cloudsdk/channels/rapid/downloads/google-cloud-sdk-$CLOUD_SDK_VERSION-linux-x86_64.tar.gz
-            tar -zxvf google-cloud-sdk-$CLOUD_SDK_VERSION-linux-x86_64.tar.gz
-            bash ./google-cloud-sdk/install.sh
-            unlink google-cloud-sdk-$CLOUD_SDK_VERSION-linux-x86_64.tar.gz
-
-      - run: env PATH $PATH:/root/google-cloud-sdk/bin
-      - run: gcloud --quiet components update
-      - run: gcloud --quiet components update kubectl
-      - run: |
-          cat <<EOF >account-auth.json
-          ${ACCOUNT_AUTH}
-          EOF
-      - run: gcloud auth activate-service-account --key-file account-auth.json
-      - run: gcloud config set project $PROJECT_NAME \
-                         gcloud --quiet config set container/cluster $CLUSTER_NAME \
-                         gcloud config set compute/zone ${GOOGLE_COMPUTE_ZONE} \
-                         gcloud --quiet container clusters get-credentials $CLUSTER_NAME
-
-      - run: ./tools/ensure-helm-installed.sh
-
-      - deploy:
-          name: Build and push Docker image
-          command: |
-            if [ "${CIRCLE_BRANCH}" == "master" ]; then
-
-            # todo: get version dynamically?
-            export version=4.1.0
-
-            sudo /opt/google-cloud-sdk/bin/gcloud docker build -t $DOCKER_IMAGE:$version-$CIRCLE_BUILD_NUM .
-            sudo /opt/google-cloud-sdk/bin/gcloud docker build -t $DOCKER_IMAGE:latest .
-
-            sudo /opt/google-cloud-sdk/bin/gcloud docker push $DOCKER_IMAGE:$version-$CIRCLE_BUILD_NUM
-            sudo /opt/google-cloud-sdk/bin/gcloud docker push $DOCKER_IMAGE:latest
-
-            sudo helm upgrade $APP_NAME charts/$APP_NAME --set image.tag=$version-$IMAGE_TAG --install
-            fi
+            set -x
+            chmod +x integration-tests.sh
+            ./integration-tests.sh

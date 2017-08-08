@@ -2,7 +2,7 @@ appName: eddi
 namespace: default
 replicaCount: 1
 image:
-  repository: eu.gcr.io/differ-140008/etf-service-bot-eddi
+  repository: labsai/eddi
   tag: latest
   pullPolicy: IfNotPresent
 containers:
@@ -22,6 +22,8 @@ env:
     value: 'differ-140008'
   - name: EDDI_JAVA_ENV_MONGODB_HOST
     value: 'mongodb.hosts=eddi-storage-0.eddi-storage'
+  - name: EDDI_ENV
+    value: 'development'
 mongodb:
   appName: eddi-storage
   namespace: default
