@@ -3,18 +3,16 @@ namespace: default
 replicaCount: 1
 image:
   repository: labsai/eddi
-  tag: latest
   pullPolicy: IfNotPresent
 containers:
   internalPort: 7070
 resources:
   limits:
-    cpu: 100m
-    # nodejs heap limit
-    memory: 1536Mi
+    cpu: 500m
+    memory: 2Gi
   requests:
-    cpu: 20m
-    memory: 64Mi
+    cpu: 200m
+    memory: 512Mi
 env:
   - name: GET_HOSTS_FROM
     value: dns
@@ -31,5 +29,5 @@ mongodb:
   imagePullPolicy: IfNotPresent
   resources:
     requests:
-      memory: 128Mi
-      cpu: 20m
+      memory: 256Mi
+      cpu: 100m
