@@ -2,12 +2,13 @@ package ai.labs.backupservice.impl;
 
 import ai.labs.backupservice.IRestImportService;
 import ai.labs.backupservice.IZipArchive;
+import ai.labs.models.BotDeploymentStatus;
+import ai.labs.models.DocumentDescriptor;
 import ai.labs.resources.rest.behavior.IRestBehaviorStore;
 import ai.labs.resources.rest.behavior.model.BehaviorConfiguration;
 import ai.labs.resources.rest.bots.IRestBotStore;
 import ai.labs.resources.rest.bots.model.BotConfiguration;
 import ai.labs.resources.rest.documentdescriptor.IRestDocumentDescriptorStore;
-import ai.labs.resources.rest.documentdescriptor.model.DocumentDescriptor;
 import ai.labs.resources.rest.http.IRestHttpCallsStore;
 import ai.labs.resources.rest.http.model.HttpCallsConfiguration;
 import ai.labs.resources.rest.output.IRestOutputStore;
@@ -17,6 +18,7 @@ import ai.labs.resources.rest.packages.model.PackageConfiguration;
 import ai.labs.resources.rest.patch.PatchInstruction;
 import ai.labs.resources.rest.regulardictionary.IRestRegularDictionaryStore;
 import ai.labs.resources.rest.regulardictionary.model.RegularDictionaryConfiguration;
+import ai.labs.rest.rest.IRestBotAdministration;
 import ai.labs.rest.restinterfaces.IRestInterfaceFactory;
 import ai.labs.rest.restinterfaces.RestInterfaceFactory;
 import ai.labs.serialization.IJsonSerialization;
@@ -25,9 +27,9 @@ import ai.labs.utilities.RestUtilities;
 import lombok.extern.slf4j.Slf4j;
 
 import javax.inject.Inject;
-import javax.inject.Named;
 import javax.ws.rs.InternalServerErrorException;
 import javax.ws.rs.container.AsyncResponse;
+import javax.ws.rs.container.TimeoutHandler;
 import javax.ws.rs.core.Response;
 import java.io.*;
 import java.net.URI;
@@ -39,7 +41,9 @@ import java.util.concurrent.TimeUnit;
 import java.util.regex.Pattern;
 import java.util.stream.Collectors;
 import java.util.stream.IntStream;
+import java.util.stream.Stream;
 
+import static ai.labs.models.Deployment.Environment.unrestricted;
 import static ai.labs.persistence.IResourceStore.IResourceId;
 
 /**
@@ -50,52 +54,94 @@ public class RestImportService extends AbstractBackupService implements IRestImp
     private static final Pattern EDDI_URI_PATTERN = Pattern.compile("\"eddi://ai.labs..*?\"");
     private static final String BOT_FILE_ENDING = ".bot.json";
     private final Path tmpPath = Paths.get(FileUtilities.buildPath(System.getProperty("user.dir"), "tmp", "import"));
+    private final Path examplePath = Paths.get(FileUtilities.buildPath(System.getProperty("user.dir"), "resources", "examples"));
     private final IZipArchive zipArchive;
     private final IJsonSerialization jsonSerialization;
     private final IRestInterfaceFactory restInterfaceFactory;
-    private final String apiServerURI;
+    private final IRestBotAdministration restBotAdministration;
 
     @Inject
     public RestImportService(IZipArchive zipArchive,
                              IJsonSerialization jsonSerialization,
                              IRestInterfaceFactory restInterfaceFactory,
-                             @Named("system.apiServerURI") String apiServerURI) {
+                             IRestBotAdministration restBotAdministration) {
         this.zipArchive = zipArchive;
         this.jsonSerialization = jsonSerialization;
         this.restInterfaceFactory = restInterfaceFactory;
-        this.apiServerURI = apiServerURI;
+        this.restBotAdministration = restBotAdministration;
+    }
+
+    @Override
+    public List<BotDeploymentStatus> importBotExamples() {
+        try (Stream<Path> walk = Files.walk(examplePath)) {
+            walk.filter(file -> file.getFileName().toString().endsWith(".zip")).
+                    forEach(path -> {
+                        try {
+                            importBot(new FileInputStream(path.toFile()), new MockAsyncResponse() {
+                                @Override
+                                public boolean resume(Object responseObj) {
+                                    if (responseObj instanceof Response) {
+                                        Response response = (Response) responseObj;
+                                        IResourceId botId = RestUtilities.extractResourceId(response.getLocation());
+                                        restBotAdministration.
+                                                deployBot(
+                                                        unrestricted,
+                                                        botId.getId(),
+                                                        botId.getVersion(),
+                                                        true);
+                                        return true;
+                                    }
+
+                                    return false;
+                                }
+                            });
+                        } catch (FileNotFoundException e) {
+                            log.error(e.getLocalizedMessage(), e);
+                        }
+                    });
+            Thread.sleep(500);
+            log.info("Imported & Deployed Example Bots");
+            return restBotAdministration.getDeploymentStatuses(unrestricted);
+        } catch (IOException | InterruptedException e) {
+            log.error(e.getLocalizedMessage(), e);
+            throw new InternalServerErrorException();
+        }
     }
 
     @Override
     public void importBot(InputStream zippedBotConfigFiles, AsyncResponse response) {
         try {
-            response.setTimeout(60, TimeUnit.SECONDS);
+            if (response != null) response.setTimeout(60, TimeUnit.SECONDS);
             File targetDir = new File(FileUtilities.buildPath(tmpPath.toString(), UUID.randomUUID().toString()));
-            this.zipArchive.unzip(zippedBotConfigFiles, targetDir);
-
-            String targetDirPath = targetDir.getPath();
-            Files.newDirectoryStream(Paths.get(targetDirPath),
-                    path -> path.toString().endsWith(BOT_FILE_ENDING))
-                    .forEach(botFilePath -> {
-                        try {
-                            String botFileString = readFile(botFilePath);
-                            BotConfiguration botConfiguration =
-                                    jsonSerialization.deserialize(botFileString, BotConfiguration.class);
-                            botConfiguration.getPackages().forEach(packageUri ->
-                                    parsePackage(targetDirPath, packageUri, botConfiguration, response));
-
-                            URI newBotUri = createNewBot(botConfiguration);
-                            updateDocumentDescriptor(Paths.get(targetDirPath), buildOldBotUri(botFilePath), newBotUri);
-                            response.resume(Response.ok().location(newBotUri).build());
-                        } catch (IOException | RestInterfaceFactory.RestInterfaceFactoryException e) {
-                            log.error(e.getLocalizedMessage(), e);
-                            response.resume(new InternalServerErrorException());
-                        }
-                    });
+            importBotZipFile(zippedBotConfigFiles, targetDir, response);
         } catch (IOException e) {
             log.error(e.getLocalizedMessage(), e);
             response.resume(new InternalServerErrorException());
         }
+    }
+
+    private void importBotZipFile(InputStream zippedBotConfigFiles, File targetDir, AsyncResponse response) throws IOException {
+        this.zipArchive.unzip(zippedBotConfigFiles, targetDir);
+
+        String targetDirPath = targetDir.getPath();
+        Files.newDirectoryStream(Paths.get(targetDirPath),
+                path -> path.toString().endsWith(BOT_FILE_ENDING))
+                .forEach(botFilePath -> {
+                    try {
+                        String botFileString = readFile(botFilePath);
+                        BotConfiguration botConfiguration =
+                                jsonSerialization.deserialize(botFileString, BotConfiguration.class);
+                        botConfiguration.getPackages().forEach(packageUri ->
+                                parsePackage(targetDirPath, packageUri, botConfiguration, response));
+
+                        URI newBotUri = createNewBot(botConfiguration);
+                        updateDocumentDescriptor(Paths.get(targetDirPath), buildOldBotUri(botFilePath), newBotUri);
+                        response.resume(Response.ok().location(newBotUri).build());
+                    } catch (IOException | RestInterfaceFactory.RestInterfaceFactoryException e) {
+                        log.error(e.getLocalizedMessage(), e);
+                        response.resume(new InternalServerErrorException());
+                    }
+                });
     }
 
     private URI buildOldBotUri(Path botPath) {
@@ -181,6 +227,7 @@ public class RestImportService extends AbstractBackupService implements IRestImp
             throws RestInterfaceFactory.RestInterfaceFactoryException {
         IRestBotStore restPackageStore = getRestResourceStore(IRestBotStore.class);
         Response botResponse = restPackageStore.createBot(botConfiguration);
+        checkIfCreatedResponse(botResponse);
         return botResponse.getLocation();
     }
 
@@ -190,6 +237,7 @@ public class RestImportService extends AbstractBackupService implements IRestImp
                 jsonSerialization.deserialize(packageFileString, PackageConfiguration.class);
         IRestPackageStore restPackageStore = getRestResourceStore(IRestPackageStore.class);
         Response packageResponse = restPackageStore.createPackage(packageConfiguration);
+        checkIfCreatedResponse(packageResponse);
         return packageResponse.getLocation();
     }
 
@@ -198,6 +246,7 @@ public class RestImportService extends AbstractBackupService implements IRestImp
         IRestRegularDictionaryStore restDictionaryStore = getRestResourceStore(IRestRegularDictionaryStore.class);
         return dictionaryConfigurations.stream().map(regularDictionaryConfiguration -> {
             Response dictionaryResponse = restDictionaryStore.createRegularDictionary(regularDictionaryConfiguration);
+            checkIfCreatedResponse(dictionaryResponse);
             return dictionaryResponse.getLocation();
         }).collect(Collectors.toList());
     }
@@ -207,6 +256,7 @@ public class RestImportService extends AbstractBackupService implements IRestImp
         IRestBehaviorStore restBehaviorStore = getRestResourceStore(IRestBehaviorStore.class);
         return behaviorConfigurations.stream().map(behaviorConfiguration -> {
             Response behaviorResponse = restBehaviorStore.createBehaviorRuleSet(behaviorConfiguration);
+            checkIfCreatedResponse(behaviorResponse);
             return behaviorResponse.getLocation();
         }).collect(Collectors.toList());
     }
@@ -216,6 +266,7 @@ public class RestImportService extends AbstractBackupService implements IRestImp
         IRestHttpCallsStore restHttpCallsStore = getRestResourceStore(IRestHttpCallsStore.class);
         return httpCallsConfigurations.stream().map(httpCallsConfiguration -> {
             Response httpCallsResponse = restHttpCallsStore.createHttpCalls(httpCallsConfiguration);
+            checkIfCreatedResponse(httpCallsResponse);
             return httpCallsResponse.getLocation();
         }).collect(Collectors.toList());
     }
@@ -224,8 +275,9 @@ public class RestImportService extends AbstractBackupService implements IRestImp
             throws RestInterfaceFactory.RestInterfaceFactoryException {
         IRestOutputStore restOutputStore = getRestResourceStore(IRestOutputStore.class);
         return outputConfigurations.stream().map(outputConfiguration -> {
-            Response dictionaryResponse = restOutputStore.createOutputSet(outputConfiguration);
-            return dictionaryResponse.getLocation();
+            Response outputResponse = restOutputStore.createOutputSet(outputConfiguration);
+            checkIfCreatedResponse(outputResponse);
+            return outputResponse.getLocation();
         }).collect(Collectors.toList());
     }
 
@@ -285,7 +337,7 @@ public class RestImportService extends AbstractBackupService implements IRestImp
     }
 
     private <T> T getRestResourceStore(Class<T> clazz) throws RestInterfaceFactory.RestInterfaceFactoryException {
-        return restInterfaceFactory.get(clazz, apiServerURI);
+        return restInterfaceFactory.get(clazz);
     }
 
     private <T> List<T> readResources(List<URI> uris, Path packagePath, String extension, Class<T> clazz) {
@@ -322,6 +374,86 @@ public class RestImportService extends AbstractBackupService implements IRestImp
             }
 
             return builder.toString();
+        }
+    }
+
+    private void checkIfCreatedResponse(Response response) {
+        int status = response.getStatus();
+        if (status != 201) {
+            log.error(String.format("Http Response Code was not 201 when attempting resource creation, but %s", status));
+        }
+    }
+
+    private static class MockAsyncResponse implements AsyncResponse {
+
+        @Override
+        public boolean resume(Object response) {
+            return false;
+        }
+
+        @Override
+        public boolean resume(Throwable response) {
+            return false;
+        }
+
+        @Override
+        public boolean cancel() {
+            return false;
+        }
+
+        @Override
+        public boolean cancel(int retryAfter) {
+            return false;
+        }
+
+        @Override
+        public boolean cancel(Date retryAfter) {
+            return false;
+        }
+
+        @Override
+        public boolean isSuspended() {
+            return false;
+        }
+
+        @Override
+        public boolean isCancelled() {
+            return false;
+        }
+
+        @Override
+        public boolean isDone() {
+            return false;
+        }
+
+        @Override
+        public boolean setTimeout(long time, TimeUnit unit) {
+            return false;
+        }
+
+        @Override
+        public void setTimeoutHandler(TimeoutHandler handler) {
+
+        }
+
+        @Override
+        public Collection<Class<?>> register(Class<?> callback) {
+            return null;
+        }
+
+        @Override
+        public Map<Class<?>, Collection<Class<?>>> register(Class<?> callback, Class<?>... callbacks) {
+            return null;
+        }
+
+        @Override
+        public Collection<Class<?>> register(Object callback) {
+            return null;
+        }
+
+        @Override
+        public Map<Class<?>, Collection<Class<?>>> register(Object callback, Object... callbacks) {
+            return null;
         }
     }
 }

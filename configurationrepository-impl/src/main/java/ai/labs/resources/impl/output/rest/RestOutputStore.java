@@ -1,13 +1,16 @@
 package ai.labs.resources.impl.output.rest;
 
+import ai.labs.models.DocumentDescriptor;
 import ai.labs.persistence.IResourceStore;
 import ai.labs.resources.impl.resources.rest.RestVersionInfo;
 import ai.labs.resources.rest.documentdescriptor.IDocumentDescriptorStore;
-import ai.labs.resources.rest.documentdescriptor.model.DocumentDescriptor;
 import ai.labs.resources.rest.output.IOutputStore;
 import ai.labs.resources.rest.output.IRestOutputStore;
 import ai.labs.resources.rest.output.model.OutputConfigurationSet;
 import ai.labs.resources.rest.patch.PatchInstruction;
+import ai.labs.rest.restinterfaces.IRestInterfaceFactory;
+import ai.labs.rest.restinterfaces.RestInterfaceFactory;
+import ai.labs.schema.IJsonSchemaCreator;
 import lombok.extern.slf4j.Slf4j;
 
 import javax.inject.Inject;
@@ -22,12 +25,32 @@ import java.util.List;
 @Slf4j
 public class RestOutputStore extends RestVersionInfo<OutputConfigurationSet> implements IRestOutputStore {
     private final IOutputStore outputStore;
+    private final IJsonSchemaCreator jsonSchemaCreator;
+    private IRestOutputStore restOutputStore;
 
     @Inject
     public RestOutputStore(IOutputStore outputStore,
-                           IDocumentDescriptorStore documentDescriptorStore) {
+                           IRestInterfaceFactory restInterfaceFactory,
+                           IDocumentDescriptorStore documentDescriptorStore,
+                           IJsonSchemaCreator jsonSchemaCreator) {
         super(resourceURI, outputStore, documentDescriptorStore);
         this.outputStore = outputStore;
+        this.jsonSchemaCreator = jsonSchemaCreator;
+        initRestClient(restInterfaceFactory);
+    }
+
+    private void initRestClient(IRestInterfaceFactory restInterfaceFactory) {
+        try {
+            restOutputStore = restInterfaceFactory.get(IRestOutputStore.class);
+        } catch (RestInterfaceFactory.RestInterfaceFactoryException e) {
+            restOutputStore = null;
+            log.error(e.getLocalizedMessage(), e);
+        }
+    }
+
+    @Override
+    public Response readJsonSchema() {
+        return Response.ok(jsonSchemaCreator.generateSchema(OutputConfigurationSet.class)).build();
     }
 
     @Override
@@ -116,6 +139,20 @@ public class RestOutputStore extends RestVersionInfo<OutputConfigurationSet> imp
         }
 
         return currentOutputConfigurationSet;
+    }
+
+    @Override
+    public Response duplicateOutputSet(String id, Integer version) {
+        validateParameters(id, version);
+        try {
+            var outputConfigurationSet = outputStore.read(id, version);
+            return restOutputStore.createOutputSet(outputConfigurationSet);
+        } catch (IResourceStore.ResourceNotFoundException e) {
+            throw new NotFoundException();
+        } catch (IResourceStore.ResourceStoreException e) {
+            log.error(e.getLocalizedMessage(), e);
+            throw new InternalServerErrorException();
+        }
     }
 
     @Override

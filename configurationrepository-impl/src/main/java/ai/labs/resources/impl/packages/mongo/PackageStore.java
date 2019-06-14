@@ -1,10 +1,10 @@
 package ai.labs.resources.impl.packages.mongo;
 
+import ai.labs.models.DocumentDescriptor;
 import ai.labs.persistence.mongo.HistorizedResourceStore;
 import ai.labs.persistence.mongo.MongoResourceStorage;
 import ai.labs.resources.impl.utilities.ResourceUtilities;
 import ai.labs.resources.rest.documentdescriptor.IDocumentDescriptorStore;
-import ai.labs.resources.rest.documentdescriptor.model.DocumentDescriptor;
 import ai.labs.resources.rest.packages.IPackageStore;
 import ai.labs.resources.rest.packages.model.PackageConfiguration;
 import ai.labs.serialization.IDocumentBuilder;
@@ -88,21 +88,25 @@ public class PackageStore implements IPackageStore {
                     continue;
                 }
 
-                boolean alreadyContainsResource = !ret.stream().filter(
+                boolean alreadyContainsResource = ret.stream().anyMatch(
                         resource ->
                         {
                             String id = URIUtilities.extractResourceId(resource.getResource()).getId();
                             return id.equals(packageId.getId());
-                        }).
-                        findFirst().isEmpty();
+                        });
 
                 if (alreadyContainsResource) {
                     continue;
                 }
 
-                ret.add(documentDescriptorStore.readDescriptor(
-                        packageId.getId(),
-                        packageId.getVersion()));
+                try {
+                    var packageDescriptor = documentDescriptorStore.readDescriptor(
+                            packageId.getId(),
+                            packageId.getVersion());
+                    ret.add(packageDescriptor);
+                } catch (ResourceNotFoundException e) {
+                    //skip, as this resource is not available anymore due to deletion
+                }
             }
 
             version--;

@@ -1,16 +1,19 @@
 package ai.labs.resources.impl.bots.rest;
 
+import ai.labs.models.DocumentDescriptor;
 import ai.labs.persistence.IResourceStore;
 import ai.labs.resources.impl.packages.rest.RestPackageStore;
 import ai.labs.resources.impl.resources.rest.RestVersionInfo;
-import ai.labs.resources.impl.utilities.ResourceUtilities;
 import ai.labs.resources.rest.bots.IBotStore;
 import ai.labs.resources.rest.bots.IRestBotStore;
 import ai.labs.resources.rest.bots.model.BotConfiguration;
 import ai.labs.resources.rest.documentdescriptor.IDocumentDescriptorStore;
-import ai.labs.resources.rest.documentdescriptor.model.DocumentDescriptor;
 import ai.labs.resources.rest.packages.IRestPackageStore;
+import ai.labs.rest.restinterfaces.IRestInterfaceFactory;
+import ai.labs.rest.restinterfaces.RestInterfaceFactory;
+import ai.labs.schema.IJsonSchemaCreator;
 import ai.labs.utilities.RestUtilities;
+import ai.labs.utilities.URIUtilities;
 import lombok.extern.slf4j.Slf4j;
 
 import javax.inject.Inject;
@@ -20,7 +23,7 @@ import javax.ws.rs.core.Response;
 import java.net.URI;
 import java.util.List;
 
-import static ai.labs.resources.impl.utilities.ResourceUtilities.createMalFormattedResourceUriException;
+import static ai.labs.resources.impl.utilities.ResourceUtilities.*;
 import static javax.ws.rs.core.Response.Status.BAD_REQUEST;
 
 /**
@@ -30,12 +33,35 @@ import static javax.ws.rs.core.Response.Status.BAD_REQUEST;
 public class RestBotStore extends RestVersionInfo<BotConfiguration> implements IRestBotStore {
     private static final String PACKAGE_URI = IRestPackageStore.resourceURI;
     private final IBotStore botStore;
+    private final IRestPackageStore restPackageStore;
+    private final IJsonSchemaCreator jsonSchemaCreator;
+    private IRestBotStore restBotStore;
 
     @Inject
     public RestBotStore(IBotStore botStore,
-                        IDocumentDescriptorStore documentDescriptorStore) {
+                        IRestPackageStore restPackageStore,
+                        IRestInterfaceFactory restInterfaceFactory,
+                        IDocumentDescriptorStore documentDescriptorStore,
+                        IJsonSchemaCreator jsonSchemaCreator) {
         super(resourceURI, botStore, documentDescriptorStore);
         this.botStore = botStore;
+        this.restPackageStore = restPackageStore;
+        this.jsonSchemaCreator = jsonSchemaCreator;
+        initRestClient(restInterfaceFactory);
+    }
+
+    private void initRestClient(IRestInterfaceFactory restInterfaceFactory) {
+        try {
+            restBotStore = restInterfaceFactory.get(IRestBotStore.class);
+        } catch (RestInterfaceFactory.RestInterfaceFactoryException e) {
+            restBotStore = null;
+            log.error(e.getLocalizedMessage(), e);
+        }
+    }
+
+    @Override
+    public Response readJsonSchema() {
+        return Response.ok(jsonSchemaCreator.generateSchema(BotConfiguration.class)).build();
     }
 
     @Override
@@ -45,7 +71,7 @@ public class RestBotStore extends RestVersionInfo<BotConfiguration> implements I
 
     @Override
     public List<DocumentDescriptor> readBotDescriptors(String filter, Integer index, Integer limit, String containingPackageUri, Boolean includePreviousVersions) {
-        IResourceStore.IResourceId validatedResourceId = ResourceUtilities.validateUri(containingPackageUri);
+        IResourceStore.IResourceId validatedResourceId = validateUri(containingPackageUri);
         if (validatedResourceId == null || !containingPackageUri.startsWith(PACKAGE_URI)) {
             return createMalFormattedResourceUriException(containingPackageUri);
         }
@@ -96,6 +122,33 @@ public class RestBotStore extends RestVersionInfo<BotConfiguration> implements I
     @Override
     public Response createBot(BotConfiguration botConfiguration) {
         return create(botConfiguration);
+    }
+
+    @Override
+    public Response duplicateBot(String id, Integer version, Boolean deepCopy) {
+        validateParameters(id, version);
+        BotConfiguration botConfiguration = restBotStore.readBot(id, version);
+        if (deepCopy) {
+            List<URI> packages = botConfiguration.getPackages();
+            for (int i = 0; i < packages.size(); i++) {
+                URI packageUri = packages.get(i);
+                URIUtilities.ResourceId resourceId = URIUtilities.extractResourceId(packageUri);
+                Response duplicateResourceResponse = restPackageStore.
+                        duplicatePackage(resourceId.getId(), resourceId.getVersion(), true);
+                URI newResourceLocation = duplicateResourceResponse.getLocation();
+                packages.set(i, newResourceLocation);
+            }
+        }
+
+        try {
+            Response createBotResponse = restBotStore.createBot(botConfiguration);
+            createDocumentDescriptorForDuplicate(documentDescriptorStore, id, version, createBotResponse.getLocation());
+
+            return createBotResponse;
+        } catch (Exception e) {
+            log.error(e.getLocalizedMessage(), e);
+            throw new InternalServerErrorException();
+        }
     }
 
     @Override

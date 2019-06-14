@@ -1,13 +1,16 @@
 package ai.labs.resources.impl.regulardictionary.rest;
 
+import ai.labs.models.DocumentDescriptor;
 import ai.labs.persistence.IResourceStore;
 import ai.labs.resources.impl.resources.rest.RestVersionInfo;
 import ai.labs.resources.rest.documentdescriptor.IDocumentDescriptorStore;
-import ai.labs.resources.rest.documentdescriptor.model.DocumentDescriptor;
 import ai.labs.resources.rest.patch.PatchInstruction;
 import ai.labs.resources.rest.regulardictionary.IRegularDictionaryStore;
 import ai.labs.resources.rest.regulardictionary.IRestRegularDictionaryStore;
 import ai.labs.resources.rest.regulardictionary.model.RegularDictionaryConfiguration;
+import ai.labs.rest.restinterfaces.IRestInterfaceFactory;
+import ai.labs.rest.restinterfaces.RestInterfaceFactory;
+import ai.labs.schema.IJsonSchemaCreator;
 import lombok.extern.slf4j.Slf4j;
 
 import javax.inject.Inject;
@@ -22,12 +25,32 @@ import java.util.List;
 @Slf4j
 public class RestRegularDictionaryStore extends RestVersionInfo<RegularDictionaryConfiguration> implements IRestRegularDictionaryStore {
     private final IRegularDictionaryStore regularDictionaryStore;
+    private final IJsonSchemaCreator jsonSchemaCreator;
+    private IRestRegularDictionaryStore restRegularDictionaryStore;
 
     @Inject
     public RestRegularDictionaryStore(IRegularDictionaryStore regularDictionaryStore,
-                                      IDocumentDescriptorStore documentDescriptorStore) {
+                                      IRestInterfaceFactory restInterfaceFactory,
+                                      IDocumentDescriptorStore documentDescriptorStore,
+                                      IJsonSchemaCreator jsonSchemaCreator) {
         super(resourceURI, regularDictionaryStore, documentDescriptorStore);
         this.regularDictionaryStore = regularDictionaryStore;
+        this.jsonSchemaCreator = jsonSchemaCreator;
+        initRestClient(restInterfaceFactory);
+    }
+
+    private void initRestClient(IRestInterfaceFactory restInterfaceFactory) {
+        try {
+            restRegularDictionaryStore = restInterfaceFactory.get(IRestRegularDictionaryStore.class);
+        } catch (RestInterfaceFactory.RestInterfaceFactoryException e) {
+            restRegularDictionaryStore = null;
+            log.error(e.getLocalizedMessage(), e);
+        }
+    }
+
+    @Override
+    public Response readJsonSchema() {
+        return Response.ok(jsonSchemaCreator.generateSchema(RegularDictionaryConfiguration.class)).build();
     }
 
     @Override
@@ -103,6 +126,20 @@ public class RestRegularDictionaryStore extends RestVersionInfo<RegularDictionar
         }
 
         return currentRegularDictionaryConfiguration;
+    }
+
+    @Override
+    public Response duplicateRegularDictionary(String id, Integer version) {
+        validateParameters(id, version);
+        try {
+            var regularDictionaryConfiguration = regularDictionaryStore.read(id, version);
+            return restRegularDictionaryStore.createRegularDictionary(regularDictionaryConfiguration);
+        } catch (IResourceStore.ResourceNotFoundException e) {
+            throw new NotFoundException();
+        } catch (IResourceStore.ResourceStoreException e) {
+            log.error(e.getLocalizedMessage(), e);
+            throw new InternalServerErrorException();
+        }
     }
 
     @Override

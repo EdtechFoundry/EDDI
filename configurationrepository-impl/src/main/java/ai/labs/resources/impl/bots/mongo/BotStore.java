@@ -1,5 +1,6 @@
 package ai.labs.resources.impl.bots.mongo;
 
+import ai.labs.models.DocumentDescriptor;
 import ai.labs.persistence.IResourceStore;
 import ai.labs.persistence.mongo.HistorizedResourceStore;
 import ai.labs.persistence.mongo.MongoResourceStorage;
@@ -8,7 +9,6 @@ import ai.labs.resources.impl.utilities.ResourceUtilities;
 import ai.labs.resources.rest.bots.IBotStore;
 import ai.labs.resources.rest.bots.model.BotConfiguration;
 import ai.labs.resources.rest.documentdescriptor.IDocumentDescriptorStore;
-import ai.labs.resources.rest.documentdescriptor.model.DocumentDescriptor;
 import ai.labs.serialization.IDocumentBuilder;
 import ai.labs.utilities.RuntimeUtilities;
 import ai.labs.utilities.URIUtilities;
@@ -85,16 +85,20 @@ public class BotStore implements IBotStore {
                     continue;
                 }
 
-                boolean alreadyContainsResource = !ret.stream().filter(
+                boolean alreadyContainsResource = ret.stream().anyMatch(
                         descriptor ->
-                                URIUtilities.extractResourceId(descriptor.getResource()).getId().equals(botId.getId())).
-                        findFirst().isEmpty();
+                                URIUtilities.extractResourceId(descriptor.getResource()).getId().equals(botId.getId()));
 
                 if (alreadyContainsResource) {
                     continue;
                 }
 
-                ret.add(documentDescriptorStore.readDescriptor(botId.getId(), botId.getVersion()));
+                try {
+                    var botDescriptor = documentDescriptorStore.readDescriptor(botId.getId(), botId.getVersion());
+                    ret.add(botDescriptor);
+                } catch (ResourceNotFoundException e) {
+                    //skip, as this resource is not available anymore due to deletion
+                }
             }
 
             packageVersion--;

@@ -1,14 +1,20 @@
 package ai.labs.resources.impl.packages.rest;
 
+import ai.labs.models.DocumentDescriptor;
 import ai.labs.persistence.IResourceStore;
 import ai.labs.resources.impl.resources.rest.RestVersionInfo;
-import ai.labs.resources.impl.utilities.ResourceUtilities;
 import ai.labs.resources.rest.documentdescriptor.IDocumentDescriptorStore;
-import ai.labs.resources.rest.documentdescriptor.model.DocumentDescriptor;
 import ai.labs.resources.rest.packages.IPackageStore;
 import ai.labs.resources.rest.packages.IRestPackageStore;
 import ai.labs.resources.rest.packages.model.PackageConfiguration;
+import ai.labs.resources.rest.packages.model.PackageConfiguration.PackageExtension;
+import ai.labs.rest.restinterfaces.IRestInterfaceFactory;
+import ai.labs.rest.restinterfaces.RestInterfaceFactory;
+import ai.labs.runtime.client.configuration.ResourceClientLibrary;
+import ai.labs.runtime.service.ServiceException;
+import ai.labs.schema.IJsonSchemaCreator;
 import ai.labs.utilities.RestUtilities;
+import ai.labs.utilities.URIUtilities;
 import lombok.extern.slf4j.Slf4j;
 
 import javax.inject.Inject;
@@ -19,19 +25,44 @@ import java.net.URI;
 import java.util.List;
 import java.util.Map;
 
+import static ai.labs.resources.impl.utilities.ResourceUtilities.*;
+import static ai.labs.utilities.RuntimeUtilities.isNullOrEmpty;
 import static javax.ws.rs.core.Response.Status.BAD_REQUEST;
 
 @Slf4j
 public class RestPackageStore extends RestVersionInfo<PackageConfiguration> implements IRestPackageStore {
-    private static final String KEY_URI = "uri";
     private static final String KEY_CONFIG = "config";
+    private static final String KEY_URI = "uri";
     private final IPackageStore packageStore;
+    private final ResourceClientLibrary resourceClientLibrary;
+    private final IJsonSchemaCreator jsonSchemaCreator;
+    private IRestPackageStore restPackageStore;
 
     @Inject
     public RestPackageStore(IPackageStore packageStore,
-                            IDocumentDescriptorStore documentDescriptorStore) {
+                            IRestInterfaceFactory restInterfaceFactory,
+                            ResourceClientLibrary resourceClientLibrary,
+                            IDocumentDescriptorStore documentDescriptorStore,
+                            IJsonSchemaCreator jsonSchemaCreator) {
         super(resourceURI, packageStore, documentDescriptorStore);
         this.packageStore = packageStore;
+        this.resourceClientLibrary = resourceClientLibrary;
+        this.jsonSchemaCreator = jsonSchemaCreator;
+        initRestClient(restInterfaceFactory);
+    }
+
+    private void initRestClient(IRestInterfaceFactory restInterfaceFactory) {
+        try {
+            restPackageStore = restInterfaceFactory.get(IRestPackageStore.class);
+        } catch (RestInterfaceFactory.RestInterfaceFactoryException e) {
+            restPackageStore = null;
+            log.error(e.getLocalizedMessage(), e);
+        }
+    }
+
+    @Override
+    public Response readJsonSchema() {
+        return Response.ok(jsonSchemaCreator.generateSchema(PackageConfiguration.class)).build();
     }
 
     @Override
@@ -46,8 +77,8 @@ public class RestPackageStore extends RestVersionInfo<PackageConfiguration> impl
                                                            String containingResourceUri,
                                                            Boolean includePreviousVersions) {
 
-        if (ResourceUtilities.validateUri(containingResourceUri) == null) {
-            return ResourceUtilities.createMalFormattedResourceUriException(containingResourceUri);
+        if (validateUri(containingResourceUri) == null) {
+            return createMalFormattedResourceUriException(containingResourceUri);
         }
 
         try {
@@ -78,7 +109,7 @@ public class RestPackageStore extends RestVersionInfo<PackageConfiguration> impl
 
         boolean updated = false;
         PackageConfiguration packageConfiguration = readPackage(id, version);
-        for (PackageConfiguration.PackageExtension packageExtension : packageConfiguration.getPackageExtensions()) {
+        for (PackageExtension packageExtension : packageConfiguration.getPackageExtensions()) {
             Map<String, Object> packageConfig = packageExtension.getConfig();
             if (updateResourceURI(resourceURI, resourceURIWithoutVersion, packageConfig)) {
                 updated = true;
@@ -127,6 +158,91 @@ public class RestPackageStore extends RestVersionInfo<PackageConfiguration> impl
     @Override
     public Response deletePackage(String id, Integer version) {
         return delete(id, version);
+    }
+
+    @Override
+    public Response duplicatePackage(String id, Integer version, Boolean deepCopy) {
+        validateParameters(id, version);
+        try {
+            PackageConfiguration packageConfiguration = restPackageStore.readPackage(id, version);
+            if (deepCopy) {
+                for (var packageExtension : packageConfiguration.getPackageExtensions()) {
+                    URI type = packageExtension.getType();
+                    if ("ai.labs.parser".equals(type.getHost())) {
+                        duplicateDictionaryInParser(packageExtension);
+                    }
+
+                    Map<String, Object> config = packageExtension.getConfig();
+                    if (!isNullOrEmpty(config)) {
+                        Object resourceUriObj = config.get(KEY_URI);
+                        if (!isNullOrEmpty(resourceUriObj)) {
+                            var newResourceLocation = duplicateResource(resourceUriObj);
+                            config.put(KEY_URI, newResourceLocation);
+                        }
+                    }
+                }
+            }
+
+            Response createPackageResponse = restPackageStore.createPackage(packageConfiguration);
+            createDocumentDescriptorForDuplicate(documentDescriptorStore, id, version, createPackageResponse.getLocation());
+
+            return createPackageResponse;
+        } catch (Exception e) {
+            log.error(e.getLocalizedMessage(), e);
+            throw new InternalServerErrorException();
+        }
+    }
+
+    private void duplicateDictionaryInParser(PackageExtension packageExtension) throws ServiceException {
+        URI type;
+        var dictionaries = (List<Map<String, Object>>) packageExtension.getExtensions().get("dictionaries");
+        if (!isNullOrEmpty(dictionaries)) {
+            for (var dictionary : dictionaries) {
+                type = URI.create(dictionary.get("type").toString());
+                if ("ai.labs.parser.dictionaries.regular".equals(type.getHost())) {
+                    var config = (Map<String, URI>) dictionary.get("config");
+                    if (!isNullOrEmpty(config)) {
+                        Object dictionaryUriObj = config.get(KEY_URI);
+                        if (!isNullOrEmpty(dictionaryUriObj)) {
+                            var newDictionaryLocation = duplicateResource(dictionaryUriObj);
+                            config.put(KEY_URI, newDictionaryLocation);
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    private URI duplicateResource(Object resourceUriObj) throws ServiceException {
+        URI newResourceLocation = null;
+
+        try {
+            if (!isNullOrEmpty(resourceUriObj)) {
+                URI oldResourceUri = URI.create(resourceUriObj.toString());
+
+                Response duplicateResourceResponse = resourceClientLibrary.duplicateResource(oldResourceUri);
+
+                newResourceLocation = duplicateResourceResponse.getLocation();
+
+                var oldResourceId = URIUtilities.extractResourceId(oldResourceUri);
+                createDocumentDescriptorForDuplicate(
+                        documentDescriptorStore,
+                        oldResourceId.getId(),
+                        oldResourceId.getVersion(),
+                        newResourceLocation);
+            }
+        } catch (Exception e) {
+            throw new ServiceException(e.getLocalizedMessage(), e);
+        }
+
+        if (isNullOrEmpty(newResourceLocation)) {
+            String errorMsg = String.format(
+                    "New resource for %s could not be created. " +
+                            "Mission Location Header.", resourceUriObj);
+            throw new ServiceException(errorMsg);
+        }
+
+        return newResourceLocation;
     }
 
     @Override
